@@ -72,7 +72,8 @@ def stitch_images(img1, img2, H):
     
     # Translation matrix to move to positive coordinates
     t = [-xmin, -ymin]
-    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])
+    # Ensure Ht is float32
+    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]], dtype=np.float32)
     
     # Final dimensions
     width = xmax - xmin
@@ -81,32 +82,34 @@ def stitch_images(img1, img2, H):
     # Create the panorama canvas
     panorama = np.zeros((height, width, 3), dtype=np.uint8)
     
-    # Warp first image
-    warped1 = cv.warpPerspective(img1, Ht.dot(H), (width, height))
+    # Ensure H is float32 and compute the combined transformation
+    H = H.astype(np.float32)
+    H_combined = Ht.dot(H)
     
-    # Warp second image
+    # Warp first image
+    warped1 = cv.warpPerspective(img1, H_combined, (width, height))
+    
+    # Warp second image (ensure Ht is float32)
     warped2 = cv.warpPerspective(img2, Ht, (width, height))
     
-    # Combine the images
-    # Create masks for both images
-    mask1 = warped1 > 0
-    mask2 = warped2 > 0
+    # Create masks for both images (single channel)
+    mask1 = cv.cvtColor(warped1, cv.COLOR_BGR2GRAY) > 0
+    mask2 = cv.cvtColor(warped2, cv.COLOR_BGR2GRAY) > 0
     
     # Areas where both images overlap
     overlap = mask1 & mask2
     
-    # Copy non-overlapping parts directly
-    panorama[~overlap & mask1] = warped1[~overlap & mask1]
-    panorama[~overlap & mask2] = warped2[~overlap & mask2]
-    
-    # Blend the overlapping regions
-    panorama[overlap] = cv.addWeighted(
-        warped1[overlap], 
-        0.5,
-        warped2[overlap], 
-        0.5, 
-        0
-    )
+    # Create the final panorama
+    for y in range(height):
+        for x in range(width):
+            if overlap[y, x]:
+                # Blend overlapping pixels
+                panorama[y, x] = (warped1[y, x].astype(float) * 0.5 + 
+                                warped2[y, x].astype(float) * 0.5).astype(np.uint8)
+            elif mask1[y, x]:
+                panorama[y, x] = warped1[y, x]
+            elif mask2[y, x]:
+                panorama[y, x] = warped2[y, x]
     
     return panorama
 
