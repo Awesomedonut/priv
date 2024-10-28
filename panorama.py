@@ -1,134 +1,61 @@
 import cv2 as cv
 import numpy as np
+import random
 
-def find_homography_ransac(p1, p2, matches, ransac_params):
+def create_panorama(img1, img2, keypoints1, keypoints2, matches, is_fastr=False):
     """
-    Find homography matrix using RANSAC
+    Creates a panorama from two images using RANSAC for homography estimation
     """
-    if len(matches) < 4:
-        return None, []
-    
-    # Convert points to the format needed for findHomography
-    if isinstance(matches, np.ndarray):
-        # For FASTR case
-        # Convert KeyPoints to coordinate arrays
-        pts1 = np.float32([kp.pt for kp in p1])
-        pts2 = np.float32([kp.pt for kp in p2])
-        
-        # Get the matching indices from the matches array
-        if len(matches.shape) > 2:
-            # If matches is a 3D array, find non-zero positions
-            match_positions = np.nonzero(matches)
-            pts1 = pts1[match_positions[0]]
-            pts2 = pts2[match_positions[1]]
-        else:
-            # If matches is a 2D array of indices
-            pts1 = pts1[matches[:, 0]]
-            pts2 = pts2[matches[:, 1]]
+    # RANSAC parameters
+    if is_fastr:
+        num_trials = 3000  # FASTR needs fewer trials due to better quality matches
+        threshold = 4.0    # Stricter threshold for FASTR
     else:
-        # For FAST case where matches are DMatch objects
-        pts1 = np.float32([p1[m.queryIdx].pt for m in matches])
-        pts2 = np.float32([p2[m.trainIdx].pt for m in matches])
-    
-    # Reshape points for findHomography
-    pts1 = pts1.reshape(-1, 1, 2)
-    pts2 = pts2.reshape(-1, 1, 2)
-    
-    # Find homography matrix
-    H, mask = cv.findHomography(
-        pts1, 
-        pts2,
-        cv.RANSAC,
-        ransacReprojThreshold=ransac_params['reprojection_threshold'],
-        maxIters=ransac_params['max_iterations'],
-        confidence=ransac_params['confidence']
-    )
-    
-    return H, mask
+        num_trials = 5000  # FAST needs more trials due to more noisy matches
+        threshold = 5.0    # More lenient threshold for FAST
 
-def stitch_images(img1, img2, H):
-    """
-    Stitch two images using the computed homography matrix
-    """
+    # Extract matched points
+    src_pts = np.float32([keypoints1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+    dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+
+    # Find homography using RANSAC
+    H, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC, 
+                               ransacReprojThreshold=threshold,
+                               maxIters=num_trials)
+
     if H is None:
         return None
-    
-    # Get dimensions
+
+    # Get dimensions of both images
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
-    
-    # Find corners of first image after transformation
-    corners1 = np.float32([[0, 0], [0, h1], [w1, h1], [w1, 0]]).reshape(-1, 1, 2)
-    corners2 = cv.perspectiveTransform(corners1, H)
-    
-    # Find the minimum and maximum coordinates
-    all_corners = np.concatenate((
-        corners2,
-        np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
-    ))
-    
-    [xmin, ymin] = np.int32(all_corners.min(axis=0).ravel() - 0.5)
-    [xmax, ymax] = np.int32(all_corners.max(axis=0).ravel() + 0.5)
-    
-    # Translation matrix to move to positive coordinates
-    t = [-xmin, -ymin]
-    # Ensure Ht is float32
-    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]], dtype=np.float32)
-    
-    # Final dimensions
-    width = xmax - xmin
-    height = ymax - ymin
-    
-    # Create the panorama canvas
-    panorama = np.zeros((height, width, 3), dtype=np.uint8)
-    
-    # Ensure H is float32 and compute the combined transformation
-    H = H.astype(np.float32)
-    H_combined = Ht.dot(H)
-    
-    # Warp first image
-    warped1 = cv.warpPerspective(img1, H_combined, (width, height))
-    
-    # Warp second image (ensure Ht is float32)
-    warped2 = cv.warpPerspective(img2, Ht, (width, height))
-    
-    # Create masks for both images (single channel)
-    mask1 = cv.cvtColor(warped1, cv.COLOR_BGR2GRAY) > 0
-    mask2 = cv.cvtColor(warped2, cv.COLOR_BGR2GRAY) > 0
-    
-    # Areas where both images overlap
-    overlap = mask1 & mask2
-    
-    # Create the final panorama
-    for y in range(height):
-        for x in range(width):
-            if overlap[y, x]:
-                # Blend overlapping pixels
-                panorama[y, x] = (warped1[y, x].astype(float) * 0.5 + 
-                                warped2[y, x].astype(float) * 0.5).astype(np.uint8)
-            elif mask1[y, x]:
-                panorama[y, x] = warped1[y, x]
-            elif mask2[y, x]:
-                panorama[y, x] = warped2[y, x]
-    
-    return panorama
 
-def create_panorama(img1, img2, p1, p2, matches, ransac_params, is_fastr=False):
-    """
-    Create a panorama from two images using feature matches and RANSAC
-    """
-    if matches is None or len(matches) < 4:
-        print("Not enough matches to create panorama")
-        return None
-    
-    # Find homography
-    H, mask = find_homography_ransac(p1, p2, matches, ransac_params)
-    
-    if H is None:
-        print("Could not find valid homography")
-        return None
-    
+    # Create points for corners of img1
+    corners1 = np.float32([[0, 0], [0, h1], [w1, h1], [w1, 0]]).reshape(-1, 1, 2)
+    corners2 = np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
+
+    # Transform corners of img1
+    transformed_corners = cv.perspectiveTransform(corners1, H)
+    corners = np.concatenate((transformed_corners, corners2), axis=0)
+
+    # Find min and max points to determine panorama size
+    [x_min, y_min] = np.int32(corners.min(axis=0).ravel() - 0.5)
+    [x_max, y_max] = np.int32(corners.max(axis=0).ravel() + 0.5)
+
+    # Create translation matrix to shift to positive coordinates
+    translation = np.array([
+        [1, 0, -x_min],
+        [0, 1, -y_min],
+        [0, 0, 1]
+    ])
+
+    # Combine translation with homography
+    H_final = translation @ H
+
     # Create panorama
-    panorama = stitch_images(img1, img2, H)
+    panorama = cv.warpPerspective(img1, H_final, (x_max - x_min, y_max - y_min))
     
+    # Copy img2 into the panorama
+    panorama[-y_min:h2-y_min, -x_min:w2-x_min] = img2
+
     return panorama
